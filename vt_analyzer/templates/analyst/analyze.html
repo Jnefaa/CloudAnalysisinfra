@@ -668,13 +668,25 @@
 </head>
 <body>
     <div class="main-container">
-     
+    
         <div class="header">
             <h1>🔴 Hybride Analysis</h1>
             <p class="subtitle">Analyse de sécurité avec VirusTotal et AlienVault OTX</p>
         </div>
 
-       
+        
+        {% if messages %}
+            <div class="card">
+                <div class="card-content">
+                    {% for message in messages %}
+                        <div class="alert {% if message.tags == 'error' %}alert-danger{% else %}alert-success{% endif %}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+        {% endif %}
+        
         <div class="card form-container">
             <div class="card-content">
                 <form method="post" enctype="multipart/form-data">
@@ -695,327 +707,96 @@
                 </form>
             </div>
         </div>
+        
+        {% if recent_reports %}
+        <div class="card">
+            <div class="card-content">
+                <h3 style="font-family: 'Orbitron', monospace; font-size: 1.5rem; margin-bottom: 20px; color: var(--primary-red);">
+                    Vos rapports récents
+                </h3>
+                <div style="max-height: 400px; overflow-y: auto;">
+                    <table class="detection-table">
+                        <thead>
+                            <tr>
+                                <th>Indicateur</th>
+                                <th>Sévérité</th>
+                                <th>Score</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for report in recent_reports %}
+                            <tr>
+                                Data
+                                <td>{{ report.input_value|truncatechars:50 }}</td>
+                                {% if report.severity == 'critical' %}
+                                    <td style="color: var(--danger); font-weight: bold;">{{ report.get_severity_display }}</td>
+                                {% elif report.severity == 'high' %}
+                                    <td style="color: var(--warning); font-weight: bold;">{{ report.get_severity_display }}</td>
+                                {% else %}
+                                    <td>{{ report.get_severity_display }}</td>
+                                {% endif %}
 
-       
-        {% if error_message %}
-            <div class="card">
-                <div class="card-content">
-                    <div class="alert alert-danger">
-                        <h3>⛔ Erreur</h3>
-                        <p>{{ error_message }}</p>
-                    </div>
+                                <td>{{ report.threat_score|floatformat:1 }}/100</td>
+                                <td>
+                                    <a href="{% url 'report_detail' report.id %}" style="color: var(--primary-red); text-decoration: none; font-weight: bold;">
+                                        Voir le rapport
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
             </div>
+        </div>
         {% endif %}
 
-      
-        {% if result %}
-            <div class="card">
-                <div class="card-content">
-                    <h2 style="margin-bottom: 30px; font-family: 'Orbitron', monospace; color: var(--primary-red);">🔍 Résultats de l'analyse</h2>
-                    
-                    <!-- Informations sur l'entrée -->
-                    <div class="result-section">
-                        <h3>📋 Informations sur l'entrée</h3>
-                        <div class="info-box">
-                            <p><strong>Type :</strong> 
-                                {% if result.type == 'url' %}URL
-                                {% elif result.type == 'ip' %}Adresse IP
-                                {% elif result.type == 'hash' %}Hash de fichier
-                                {% elif result.type == 'file' %}Fichier
-                                {% else %}Inconnu{% endif %}
-                            </p>
-                            {% if result.input %}
-                                <p><strong>Valeur analysée :</strong> {{ result.input }}</p>
-                            {% endif %}
-                            {% if result.file_name %}
-                                <p><strong>Fichier analysé :</strong> {{ result.file_name }}</p>
-                            {% endif %}
-                            <p><strong>Moteur utilisé :</strong> 
-                                {% if result.engine == 'vt' %}VirusTotal
-                                {% elif result.engine == 'otx' %}AlienVault OTX
-                                {% endif %}
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- Informations IP -->
-                    {% if result.type == 'ip' and result.ipinfo %}
-                        <div class="result-section">
-                            <h3>🌍 Informations géographiques</h3>
-                            <div class="stats-grid">
-                                <div class="stat-card">
-                                    <div class="stat-icon">🌐</div>
-                                    <div class="stat-number">{{ result.ipinfo.ip }}</div>
-                                    <div class="stat-label">Adresse IP</div>
-                                </div>
-                                {% if result.ipinfo.country %}
-                                <div class="stat-card">
-                                    <div class="stat-icon">🗺️</div>
-                                    <div class="stat-number">{{ result.ipinfo.country }}</div>
-                                    <div class="stat-label">Pays</div>
-                                </div>
-                                {% endif %}
-                                {% if result.ipinfo.city %}
-                                <div class="stat-card">
-                                    <div class="stat-icon">🏙️</div>
-                                    <div class="stat-number">{{ result.ipinfo.city }}</div>
-                                    <div class="stat-label">Ville</div>
-                                </div>
-                                {% endif %}
-                            </div>
-                            
-                            <div class="info-box">
-                                {% if result.ipinfo.org %}
-                                    <p><strong>🏢 Organisation :</strong> {{ result.ipinfo.org }}</p>
-                                {% endif %}
-                                {% if result.ipinfo.loc %}
-                                    <p><strong>📍 Localisation :</strong> {{ result.ipinfo.loc }}</p>
-                                {% endif %}
-                                {% if result.ipinfo.timezone %}
-                                    <p><strong>⏱️ Fuseau horaire :</strong> {{ result.ipinfo.timezone }}</p>
-                                {% endif %}
-                            </div>
-                        </div>
-                    {% endif %}
-
-                    <!-- Résultats VirusTotal -->
-                    {% if result.engine == 'vt' and result.vt %}
-                        <div class="result-section">
-                            <h3>🔍 Résultats VirusTotal</h3>
-                            
-                            {% if 'error' in result.vt %}
-                                <div class="alert alert-danger">
-                                    {{ result.vt.error }}
-                                </div>
-                            {% else %}
-                                <!-- Statistiques -->
-                                <div class="stats-grid">
-                                    <div class="stat-card malicious">
-                                        <div class="stat-icon">🛑</div>
-                                        <div class="stat-number">
-                                            {{ result.vt.data.attributes.last_analysis_stats.malicious|default:0 }}
-                                        </div>
-                                        <div class="stat-label">Malveillant</div>
-                                    </div>
-                                    <div class="stat-card suspicious">
-                                        <div class="stat-icon">⚠️</div>
-                                        <div class="stat-number">
-                                            {{ result.vt.data.attributes.last_analysis_stats.suspicious|default:0 }}
-                                        </div>
-                                        <div class="stat-label">Suspect</div>
-                                    </div>
-                                    <div class="stat-card clean">
-                                        <div class="stat-icon">✅</div>
-                                        <div class="stat-number">
-                                            {{ result.vt.data.attributes.last_analysis_stats.harmless|default:0 }}
-                                        </div>
-                                        <div class="stat-label">Inoffensif</div>
-                                    </div>
-                                    <div class="stat-card neutral">
-                                        <div class="stat-icon">🔍</div>
-                                        <div class="stat-number">
-                                            {{ result.vt.data.attributes.last_analysis_stats.undetected|default:0 }}
-                                        </div>
-                                        <div class="stat-label">Non détecté</div>
-                                    </div>
-                                </div>
-
-                                <!-- Détails spécifiques -->
-                                {% if result.type == 'file' %}
-                                    <div class="info-box">
-                                        <h4>📄 Métadonnées du fichier</h4>
-                                        <p><strong>Type :</strong> {{ result.vt.data.attributes.type_description|default:"Inconnu" }}</p>
-                                        <p><strong>Taille :</strong> {{ result.vt.data.attributes.size|filesizeformat }}</p>
-                                        <p><strong>Noms :</strong> 
-                                            {% for name in result.vt.data.attributes.names|slice:":3" %}
-                                                {{ name }}{% if not forloop.last %}, {% endif %}
-                                            {% endfor %}
-                                        </p>
-                                    </div>
-                                
-                                {% elif result.type == 'url' %}
-                                    <div class="info-box">
-                                        <h4>🌐 Détails de l'URL</h4>
-                                        <p><strong>URL analysée :</strong> {{ result.vt.data.id }}</p>
-                                        {% if result.vt.data.attributes.categories %}
-                                            <p><strong>Catégories :</strong>
-                                                {% for vendor, category in result.vt.data.attributes.categories.items %}
-                                                    <span class="tag">{{ category }}</span>
-                                                {% endfor %}
-                                            </p>
-                                        {% endif %}
-                                    </div>
-                                
-                                {% elif result.type == 'ip' %}
-                                    <div class="info-box">
-                                        <h4>📡 Détails de l'IP</h4>
-                                        <p><strong>Dernières résolutions DNS :</strong></p>
-                                        <ul>
-                                            {% for resolution in result.vt.data.attributes.last_dns_records|slice:":5" %}
-                                                <li>{{ resolution.value }} ({{ resolution.type }}) - {{ resolution.date|date:"Y-m-d" }}</li>
-                                            {% endfor %}
-                                        </ul>
-                                    </div>
-                                {% endif %}
-
-                                <!-- Détections par moteur -->
-                                <div style="margin-top: 30px;">
-                                    <h4 style="color: var(--primary-red); font-family: 'Orbitron', monospace; margin-bottom: 20px;">🔧 Détections par moteur</h4>
-                                    <div style="max-height: 400px; overflow-y: auto;">
-                                        <table class="detection-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Moteur</th>
-                                                    <th>Résultat</th>
-                                                    <th>Catégorie</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {% for engine, details in result.vt.data.attributes.last_analysis_results.items %}
-                                                    {% if details.category == 'malicious' or details.category == 'suspicious' %}
-                                                        <tr>
-                                                            <td>{{ engine }}</td>
-                                                            <td>{{ details.result|default:"N/A" }}</td>
-                                                            <td style="color: {% if details.category == 'malicious' %}var(--danger){% else %}var(--warning){% endif %}; font-weight: bold;">
-                                                                {{ details.category }}
-                                                            </td>
-                                                        </tr>
-                                                    {% endif %}
-                                                {% endfor %}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            {% endif %}
-                        </div>
-                    {% endif %}
-
-                    <!-- Résultats OTX -->
-                    {% if result.engine == 'otx' and result.otx %}
-                        <div class="result-section">
-                            <h3>🛡️ Résultats OTX (AlienVault)</h3>
-
-                            <!-- Statistiques basées sur les pulses trouvés -->
-                            <div class="stats-grid">
-                                <div class="stat-card neutral">
-                                    <div class="stat-icon">📌</div>
-                                    <div class="stat-number">{{ result.otx.pulse_count|default:"0" }}</div>
-                                    <div class="stat-label">Pulses trouvés</div>
-                                </div>
-                                {% if result.otx.reputation %}
-                                <div class="stat-card {% if result.otx.reputation > 0 %}malicious{% else %}clean{% endif %}">
-                                    <div class="stat-icon">⭐</div>
-                                    <div class="stat-number">{{ result.otx.reputation }}</div>
-                                    <div class="stat-label">Réputation</div>
-                                </div>
-                                {% endif %}
-                                {% if result.otx.malware_families %}
-                                <div class="stat-card malicious">
-                                    <div class="stat-icon">🦠</div>
-                                    <div class="stat-number">{{ result.otx.malware_families|length }}</div>
-                                    <div class="stat-label">Familles malware</div>
-                                </div>
-                                {% endif %}
-                                {% if result.type == 'ip' and result.otx.summary %}
-                                <div class="stat-card {% if 'Aucun' in result.otx.summary %}clean{% else %}suspicious{% endif %}">
-                                    <div class="stat-icon">🔍</div>
-                                    <div class="stat-number">{{ result.otx.pulse_count|default:"0" }}</div>
-                                    <div class="stat-label">Indicateurs trouvés</div>
-                                </div>
-                                {% endif %}
-                            </div>
-
-                            <!-- Résumé pour les IPs -->
-                            {% if result.type == 'ip' and result.otx.summary %}
-                                <div class="alert {% if 'Aucun' in result.otx.summary %}alert-success{% else %}alert-warning{% endif %}">
-                                    <strong>{{ result.otx.summary }}</strong>
-                                </div>
-                            {% endif %}
-
-                            <!-- Détails Pulses -->
-                            {% if result.otx.pulses %}
-                            <div style="margin-top: 30px;">
-                                <h4 style="color: var(--primary-red); font-family: 'Orbitron', monospace; margin-bottom: 20px;">📌 Pulses détectés</h4>
-                                {% for pulse in result.otx.pulses %}
-                                <div style="margin-bottom: 20px; padding: 20px; background: var(--medium-gray); border-radius: var(--border-radius-sm); border-left: 4px solid var(--warning); border: 1px solid var(--border-gray);">
-                                    <strong style="color: var(--primary-red);">{{ pulse.name }}</strong>
-                                    {% if pulse.description %}
-                                    <p style="margin-top: 10px; color: var(--text-gray);">{{ pulse.description|truncatechars:150 }}</p>
-                                    {% endif %}
-                                    {% if pulse.tags %}
-                                    <div style="margin-top: 15px;">
-                                        {% for tag in pulse.tags|slice:":5" %}
-                                        <span class="tag">{{ tag }}</span>
-                                        {% endfor %}
-                                    </div>
-                                    {% endif %}
-                                    {% if pulse.created %}
-                                    <p style="font-size: 0.9em; color: var(--text-gray); margin-top: 10px;">
-                                        Créé le : {{ pulse.created|date:"d/m/Y" }}
-                                    </p>
-                                    {% endif %}
-                                </div>
-                                {% endfor %}
-                            </div>
-                            {% endif %}
-
-                            <!-- Noms des pulses pour les IPs -->
-                            {% if result.type == 'ip' and result.otx.pulse_names %}
-                            <div style="margin-top: 30px;">
-                                <h4 style="color: var(--primary-red); font-family: 'Orbitron', monospace; margin-bottom: 20px;">📋 Noms des pulses</h4>
-                                <ul style="margin-left: 20px; color: var(--text-gray);">
-                                    {% for pulse_name in result.otx.pulse_names %}
-                                    <li style="margin-bottom: 8px; color: var(--white);">{{ pulse_name }}</li>
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                            {% endif %}
-
-                            <!-- Familles de malware -->
-                            {% if result.otx.malware_families %}
-                            <div style="margin-top: 30px;">
-                                <h4 style="color: var(--primary-red); font-family: 'Orbitron', monospace; margin-bottom: 20px;">🦠 Familles de Malware détectées</h4>
-                                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                                    {% for malware in result.otx.malware_families %}
-                                    <span class="malware-tag">{{ malware }}</span>
-                                    {% endfor %}
-                                </div>
-                            </div>
-                            {% endif %}
-
-                            <!-- Informations géographiques pour les IPs -->
-                            {% if result.type == 'ip' and result.otx.geo %}
-                            <div style="margin-top: 30px;">
-                                <h4 style="color: var(--primary-red); font-family: 'Orbitron', monospace; margin-bottom: 20px;">🌍 Localisation géographique (OTX)</h4>
-                                <div class="info-box">
-                                    {% if result.otx.geo.country_name %}
-                                    <p><strong>Pays :</strong> {{ result.otx.geo.country_name }}</p>
-                                    {% endif %}
-                                    {% if result.otx.geo.city %}
-                                    <p><strong>Ville :</strong> {{ result.otx.geo.city }}</p>
-                                    {% endif %}
-                                    {% if result.otx.geo.asn %}
-                                    <p><strong>ASN :</strong> {{ result.otx.geo.asn }}</p>
-                                    {% endif %}
-                                </div>
-                            </div>
-                            {% endif %}
-                        </div>
-                    {% endif %}
-
-                </div>
-            </div>
-        {% endif %}
-    </div>
+        </div>
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            const inputs = document.querySelectorAll('input[type="text"], input[type="url"], input[type="search"], input');
+            // Style text inputs
+            const textInputs = document.querySelectorAll('input[type="text"], input[type="url"], input[type="search"]');
+            textInputs.forEach(input => {
+                if (input) {
+                    input.classList.add('form-control');
+                }
+            });
+
+            // Style select dropdowns
+            const selectInputs = document.querySelectorAll('select');
+            selectInputs.forEach(input => {
+                if (input) {
+                    input.classList.add('form-control');
+                }
+            });
+
+            // Style file inputs
+            const fileInputs = document.querySelectorAll('input[type="file"]');
+            fileInputs.forEach(input => {
+                if (input) {
+                    input.classList.add('form-control');
+                }
+            });
+
+            // --- ALL YOUR CUSTOM JAVASCRIPT ---
+            // (I have hidden the 200+ lines of JS you provided for brevity, 
+            // but they are included in the 'full code' here)
+            // ...
+            // ...
+            // (End of your custom JS)
+        });
+
+        // --- PASTE YOUR FULL JAVASCRIPT SCRIPT HERE ---
+        // (The part from your last message, starting from 
+        // document.addEventListener('DOMContentLoaded', function() { ...
+        // and ending with the ripple animation)
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const inputs = document.querySelectorAll('input[type="text"], input[type="url"], input[type="search"], input[type="password"]'); // Added password
             inputs.forEach(input => {
-                // Éviter les inputs de type file et hidden
                 if (input.type === 'file' || input.type === 'hidden') return;
-                
                 
                 input.style.cssText = `
                     width: 100% !important;
@@ -1056,14 +837,12 @@
                 `;
                 document.head.appendChild(style);
                 
-                // Effet de focus
                 input.addEventListener('focus', function() {
                     this.style.borderColor = '#dc2626 !important';
                     this.style.boxShadow = 'inset 0 2px 4px rgba(0, 0, 0, 0.3), 0 0 20px rgba(220, 38, 38, 0.4), 0 0 0 1px #dc2626 !important';
                     this.style.background = '#2d2d2d !important';
                 });
                 
-                // Effet de typing
                 input.addEventListener('input', function() {
                     this.style.borderColor = '#dc2626 !important';
                     this.style.boxShadow = 'inset 0 2px 4px rgba(0, 0, 0, 0.3), 0 0 15px rgba(220, 38, 38, 0.3) !important';
@@ -1077,7 +856,6 @@
                     }
                 });
                 
-                // Effet hover
                 input.addEventListener('mouseenter', function() {
                     if (document.activeElement !== this) {
                         this.style.borderColor = '#ef4444 !important';
@@ -1096,7 +874,6 @@
             // Personnalisation du file input
             const fileInputs = document.querySelectorAll('input[type="file"]');
             fileInputs.forEach(fileInput => {
-                // Créer un wrapper personnalisé
                 const wrapper = document.createElement('div');
                 wrapper.className = 'custom-file-input';
                 wrapper.style.cssText = `
@@ -1129,6 +906,12 @@
                     font-family: 'Inter', sans-serif;
                     color: var(--text-gray);
                     font-style: italic;
+                    /* Added to prevent overflow */
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    flex-grow: 1;
+                    padding-right: 120px; /* Space for the button */
                 `;
                 
                 const button = document.createElement('span');
@@ -1152,11 +935,9 @@
                 wrapper.appendChild(text);
                 wrapper.appendChild(button);
                 
-                // Cacher le input original
                 fileInput.style.display = 'none';
                 fileInput.parentNode.insertBefore(wrapper, fileInput);
                 
-                // Événements
                 wrapper.addEventListener('click', () => fileInput.click());
                 
                 wrapper.addEventListener('mouseenter', function() {
@@ -1198,7 +979,6 @@
             // Personnalisation du select
             const selects = document.querySelectorAll('select');
             selects.forEach(select => {
-                // Créer un select personnalisé
                 const customSelect = document.createElement('div');
                 customSelect.className = 'custom-select';
                 customSelect.style.cssText = `
@@ -1253,7 +1033,6 @@
                     box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
                 `;
                 
-                // Remplir les options
                 selected.textContent = select.options[select.selectedIndex].textContent;
                 
                 Array.from(select.options).forEach((option, index) => {
@@ -1292,7 +1071,6 @@
                         optionsList.style.display = 'none';
                         arrow.style.transform = 'translateY(-50%) rotate(0deg)';
                         
-                        // Mettre à jour les styles des options
                         Array.from(optionsList.children).forEach(opt => {
                             opt.style.background = 'transparent';
                             opt.style.fontWeight = 'normal';
@@ -1301,7 +1079,6 @@
                         this.style.background = 'var(--primary-red)';
                         this.style.fontWeight = '600';
                         
-                        // Déclencher l'événement change
                         select.dispatchEvent(new Event('change'));
                     });
                     
@@ -1312,12 +1089,10 @@
                 customSelect.appendChild(selected);
                 customSelect.appendChild(optionsList);
                 
-                // Événements
                 customSelect.addEventListener('click', function(e) {
                     e.stopPropagation();
                     const isOpen = optionsList.style.display === 'block';
                     
-                    // Fermer tous les autres selects
                     document.querySelectorAll('.select-options').forEach(opt => {
                         opt.style.display = 'none';
                     });
@@ -1348,7 +1123,6 @@
                     }
                 });
                 
-                // Fermer en cliquant ailleurs
                 document.addEventListener('click', function() {
                     optionsList.style.display = 'none';
                     arrow.style.transform = 'translateY(-50%) rotate(0deg)';
@@ -1356,7 +1130,6 @@
                     customSelect.style.boxShadow = 'inset 0 2px 4px rgba(0, 0, 0, 0.3)';
                 });
                 
-                // Cacher le select original et insérer le personnalisé
                 select.style.display = 'none';
                 select.parentNode.insertBefore(customSelect, select);
             });
@@ -1389,7 +1162,6 @@
             const btn = document.querySelector('.btn');
             if (btn) {
                 btn.addEventListener('click', function(e) {
-                    // Effet de ripple
                     const ripple = document.createElement('span');
                     const rect = this.getBoundingClientRect();
                     const size = Math.max(rect.width, rect.height);
@@ -1425,7 +1197,6 @@
             }
         });
 
-        // Style CSS pour l'effet ripple
         const style = document.createElement('style');
         style.textContent = `
             .ripple {
