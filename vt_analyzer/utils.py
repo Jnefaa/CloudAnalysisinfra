@@ -1,442 +1,186 @@
-# vt_analyzer/utils.py
-
-import re
 import requests
-import time
-import hashlib
+import re
 from django.conf import settings
-from django.core.files.uploadedfile import UploadedFile
+import logging
 
-# ==================== INPUT TYPE DETECTION ====================
+logger = logging.getLogger(__name__)
+
+# Expressions régulières pour la détection de type
+IP_REGEX = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+URL_REGEX = re.compile(r"httpsa?://[^\s]+")
+DOMAIN_REGEX = re.compile(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,6}$")
+MD5_REGEX = re.compile(r"^[a-f0-9]{32}$")
+SHA1_REGEX = re.compile(r"^[a-f0-9]{40}$")
+SHA256_REGEX = re.compile(r"^[a-f0-9]{64}$")
 
 def detect_input_type(input_value):
-    """Detect if input is URL, IP, hash, or domain"""
-    # IP pattern (basic IPv4)
-    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    # Hash patterns
-    md5_pattern = r'^[a-fA-F0-9]{32}$'
-    sha1_pattern = r'^[a-fA-F0-9]{40}$'
-    sha256_pattern = r'^[a-fA-F0-9]{64}$'
-    # URL pattern
-    url_pattern = r'^https?://'
-    
-    if re.match(url_pattern, input_value):
-        return 'url'
-    elif re.match(ip_pattern, input_value):
+    """Détecte le type d'indicateur (IP, URL, Hash, Domaine)."""
+    if IP_REGEX.match(input_value):
         return 'ip'
-    elif re.match(md5_pattern, input_value) or re.match(sha1_pattern, input_value) or re.match(sha256_pattern, input_value):
+    if URL_REGEX.match(input_value):
+        return 'url'
+    if DOMAIN_REGEX.match(input_value):
+        return 'domain' # Vous devriez ajouter 'domain' à vos TYPE_CHOICES dans models.py
+    if MD5_REGEX.match(input_value) or SHA1_REGEX.match(input_value) or SHA256_REGEX.match(input_value):
         return 'hash'
-    else:
-        return 'domain'
+    return 'unknown' # Ou 'domain' par défaut si ce n'est pas une URL
 
+# --- Fonctions de l'API VirusTotal ---
 
-# ==================== VIRUSTOTAL API FUNCTIONS ====================
+VT_API_URL = "https://www.virustotal.com/api/v3"
+VT_API_KEY = settings.VIRUSTOTAL_API_KEY
 
-def get_vt_headers():
-    """Get VirusTotal API headers"""
-    vt_api_key = getattr(settings, 'VIRUSTOTAL_API_KEY', None)
-    if not vt_api_key:
-        raise ValueError("VIRUSTOTAL_API_KEY not configured in settings")
+def vt_scan_file(file_obj):
+    """Scan un fichier uploadé avec VirusTotal."""
+    if not VT_API_KEY:
+        return {'error': 'Clé API VirusTotal non configurée.'}
     
-    return {
-        'x-apikey': vt_api_key,
-        'Accept': 'application/json'
-    }
-
-
-def vt_scan_file(file):
-    """
-    Scan file with VirusTotal
+    url = f"{VT_API_URL}/files"
+    headers = {"x-apikey": VT_API_KEY}
+    files = {"file": (file_obj.name, file_obj.read())}
     
-    Args:
-        file: Django UploadedFile object
-    
-    Returns:
-        dict: VirusTotal API response or error dict
-    """
     try:
-        vt_api_key = getattr(settings, 'VIRUSTOTAL_API_KEY', None)
-        if not vt_api_key:
-            return {'error': 'VirusTotal API key not configured'}
-        
-        url = 'https://www.virustotal.com/api/v3/files'
-        
-        # Read file content
-        file.seek(0)
-        files = {'file': (file.name, file.read())}
-        headers = {'x-apikey': vt_api_key}
-        
-        # Upload file
-        response = requests.post(url, headers=headers, files=files, timeout=60)
-        
-        if response.status_code == 200:
-            result = response.json()
-            file_id = result.get('data', {}).get('id')
-            
-            # Wait and get analysis results
-            time.sleep(15)  # Wait for analysis
-            
-            analysis_url = f'https://www.virustotal.com/api/v3/analyses/{file_id}'
-            analysis_response = requests.get(analysis_url, headers=headers, timeout=30)
-            
-            if analysis_response.status_code == 200:
-                return analysis_response.json()
-            else:
-                return {'error': f'Failed to get analysis: {analysis_response.status_code}'}
-        else:
-            return {'error': f'Upload failed: {response.status_code}'}
-    
-    except Exception as e:
-        return {'error': str(e)}
-
-
-def vt_scan_url(url):
-    """
-    Scan URL with VirusTotal
-    
-    Args:
-        url: URL string to scan
-    
-    Returns:
-        dict: VirusTotal API response or error dict
-    """
-    try:
-        headers = get_vt_headers()
-        
-        # Submit URL for scanning
-        vt_url = 'https://www.virustotal.com/api/v3/urls'
-        data = {'url': url}
-        
-        response = requests.post(vt_url, headers=headers, data=data, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            analysis_id = result.get('data', {}).get('id')
-            
-            # Get analysis results
-            time.sleep(10)  # Wait for analysis
-            
-            analysis_url = f'https://www.virustotal.com/api/v3/analyses/{analysis_id}'
-            analysis_response = requests.get(analysis_url, headers=headers, timeout=30)
-            
-            if analysis_response.status_code == 200:
-                return analysis_response.json()
-            else:
-                # Try to get URL report directly
-                import base64
-                url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-                report_url = f'https://www.virustotal.com/api/v3/urls/{url_id}'
-                report_response = requests.get(report_url, headers=headers, timeout=30)
-                
-                if report_response.status_code == 200:
-                    return report_response.json()
-                else:
-                    return {'error': f'Failed to get analysis: {report_response.status_code}'}
-        else:
-            return {'error': f'Scan submission failed: {response.status_code}'}
-    
-    except Exception as e:
-        return {'error': str(e)}
-
-
-def vt_scan_ip(ip):
-    """
-    Scan IP address with VirusTotal
-    
-    Args:
-        ip: IP address string
-    
-    Returns:
-        dict: VirusTotal API response or error dict
-    """
-    try:
-        headers = get_vt_headers()
-        
-        url = f'https://www.virustotal.com/api/v3/ip_addresses/{ip}'
-        response = requests.get(url, headers=headers, timeout=30)
-        
+        response = requests.post(url, headers=headers, files=files, timeout=20)
         if response.status_code == 200:
             return response.json()
-        elif response.status_code == 404:
-            return {'error': 'IP address not found in VirusTotal database'}
         else:
-            return {'error': f'API request failed: {response.status_code}'}
-    
+            logger.error(f"Erreur VT File Scan {response.status_code}: {response.text}")
+            return {'error': f"API Error {response.status_code}", 'details': response.json()}
+    except Exception as e:
+        logger.error(f"Erreur requête VT File Scan : {e}")
+        return {'error': str(e)}
+
+def vt_get_analysis_report(analysis_id):
+    """Récupère un rapport d'analyse en cours de VT (pour les fichiers)."""
+    url = f"{VT_API_URL}/analyses/{analysis_id}"
+    headers = {"x-apikey": VT_API_KEY}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        return response.json() if response.status_code == 200 else {'error': f"API Error {response.status_code}"}
     except Exception as e:
         return {'error': str(e)}
 
-
-def vt_scan_hash(hash_value):
-    """
-    Scan file hash with VirusTotal
+def vt_scan_url(target_url):
+    """Scan une URL avec VirusTotal."""
+    if not VT_API_KEY:
+        return {'error': 'Clé API VirusTotal non configurée.'}
+        
+    url = f"{VT_API_URL}/urls"
+    headers = {"x-apikey": VT_API_KEY}
+    data = {"url": target_url}
     
-    Args:
-        hash_value: File hash (MD5, SHA1, or SHA256)
-    
-    Returns:
-        dict: VirusTotal API response or error dict
-    """
     try:
-        headers = get_vt_headers()
-        
-        url = f'https://www.virustotal.com/api/v3/files/{hash_value}'
-        response = requests.get(url, headers=headers, timeout=30)
-        
+        response = requests.post(url, headers=headers, data=data, timeout=10)
+        if response.status_code == 200:
+            # L'API retourne un ID d'analyse, nous devons ensuite récupérer le rapport
+            analysis_id = response.json().get('data', {}).get('id')
+            if analysis_id:
+                # Il faut un délai pour que l'analyse se termine
+                # Pour une API, il vaut mieux retourner l'ID et le vérifier plus tard
+                # Mais pour la simplicité, nous allons essayer de le récupérer
+                import time
+                time.sleep(15) # PAS IDÉAL POUR UNE API - Envisagez Celery
+                report_url = f"{VT_API_URL}/analyses/{analysis_id}"
+                report_response = requests.get(report_url, headers=headers, timeout=10)
+                return report_response.json() if report_response.status_code == 200 else {'error': f"Report Error {report_response.status_code}"}
+            return {'error': 'ID d\'analyse non trouvé dans la réponse VT'}
+        else:
+            logger.error(f"Erreur VT URL Scan {response.status_code}: {response.text}")
+            return {'error': f"API Error {response.status_code}", 'details': response.json()}
+    except Exception as e:
+        logger.error(f"Erreur requête VT URL Scan : {e}")
+        return {'error': str(e)}
+
+def vt_scan_ip(ip_address):
+    """Récupère le rapport pour une IP de VirusTotal."""
+    url = f"{VT_API_URL}/ip_addresses/{ip_address}"
+    return vt_generic_get_request(url)
+
+def vt_scan_hash(file_hash):
+    """Récupère le rapport pour un Hash de VirusTotal."""
+    url = f"{VT_API_URL}/files/{file_hash}"
+    return vt_generic_get_request(url)
+
+def vt_scan_domain(domain):
+    """Récupère le rapport pour un Domaine de VirusTotal."""
+    url = f"{VT_API_URL}/domains/{domain}"
+    return vt_generic_get_request(url)
+
+def vt_generic_get_request(url):
+    """Fonction générique pour les requêtes GET VT."""
+    if not VT_API_KEY:
+        return {'error': 'Clé API VirusTotal non configurée.'}
+    
+    headers = {"x-apikey": VT_API_KEY}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json()
-        elif response.status_code == 404:
-            return {'error': 'Hash not found in VirusTotal database'}
         else:
-            return {'error': f'API request failed: {response.status_code}'}
-    
+            logger.error(f"Erreur VT GET {response.status_code}: {response.text}")
+            return {'error': f"API Error {response.status_code}", 'details': response.json()}
     except Exception as e:
+        logger.error(f"Erreur requête VT GET : {e}")
         return {'error': str(e)}
 
+# --- Fonctions de l'API OTX ---
 
-# ==================== ALIENVAULT OTX API FUNCTIONS ====================
+OTX_API_URL = "https://otx.alienvault.com/api/v1"
+OTX_API_KEY = settings.OTX_API_KEY
 
-def get_otx_headers():
-    """Get AlienVault OTX API headers"""
-    otx_api_key = getattr(settings, 'OTX_API_KEY', None)
-    if not otx_api_key:
-        raise ValueError("OTX_API_KEY not configured in settings")
-    
-    return {
-        'X-OTX-API-KEY': otx_api_key,
-        'Accept': 'application/json'
-    }
+def otx_scan_ip(ip_address):
+    """Récupère le rapport pour une IP d'OTX."""
+    url = f"{OTX_API_URL}/indicators/IPv4/{ip_address}/general"
+    return otx_generic_get_request(url)
 
+def otx_scan_url(target_url):
+    """Récupère le rapport pour une URL d'OTX."""
+    # OTX utilise un encodage spécial pour les URLs
+    import base64
+    url_id = base64.urlsafe_b64encode(target_url.encode()).decode().strip("=")
+    url = f"{OTX_API_URL}/indicators/url/{url_id}/general"
+    return otx_generic_get_request(url)
 
-def otx_scan_url(url):
-    """
-    Scan URL with AlienVault OTX
-    
-    Args:
-        url: URL string to scan
-    
-    Returns:
-        dict: OTX API response or error dict
-    """
+def otx_scan_hash(file_hash):
+    """Récupère le rapport pour un Hash d'OTX."""
+    url = f"{OTX_API_URL}/indicators/file/{file_hash}/general"
+    return otx_generic_get_request(url)
+
+def otx_generic_get_request(url):
+    """Fonction générique pour les requêtes GET OTX."""
+    if not OTX_API_KEY:
+        return {'error': 'Clé API OTX non configurée.'}
+        
+    headers = {"X-OTX-API-KEY": OTX_API_KEY}
     try:
-        headers = get_otx_headers()
-        
-        # Extract domain from URL
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc
-        
-        otx_url = f'https://otx.alienvault.com/api/v1/indicators/domain/{domain}/general'
-        response = requests.get(otx_url, headers=headers, timeout=30)
-        
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            result = response.json()
-            
-            # Get additional reputation data
-            reputation_url = f'https://otx.alienvault.com/api/v1/indicators/domain/{domain}/reputation'
-            rep_response = requests.get(reputation_url, headers=headers, timeout=30)
-            
-            if rep_response.status_code == 200:
-                result['reputation'] = rep_response.json()
-            
-            return result
+            return response.json()
         else:
-            return {'error': f'OTX API request failed: {response.status_code}'}
-    
+            logger.error(f"Erreur OTX GET {response.status_code}: {response.text}")
+            return {'error': f"API Error {response.status_code}", 'details': response.json()}
     except Exception as e:
+        logger.error(f"Erreur requête OTX GET : {e}")
         return {'error': str(e)}
 
+# --- Fonction de l'API IPInfo ---
 
-def otx_scan_ip(ip):
-    """
-    Scan IP address with AlienVault OTX
-    
-    Args:
-        ip: IP address string
-    
-    Returns:
-        dict: OTX API response or error dict
-    """
+IPINFO_TOKEN = settings.IPINFO_TOKEN
+
+def get_ip_info(ip_address):
+    """Récupère les infos de géolocalisation d'IPInfo."""
+    if not IPINFO_TOKEN:
+        return {'error': 'Token IPInfo non configuré.'}
+        
+    url = f"https://ipinfo.io/{ip_address}"
+    headers = {"Authorization": f"Bearer {IPINFO_TOKEN}"}
     try:
-        headers = get_otx_headers()
-        
-        # Get general info
-        url = f'https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general'
-        response = requests.get(url, headers=headers, timeout=30)
-        
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
-            result = response.json()
-            
-            # Get reputation data
-            reputation_url = f'https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/reputation'
-            rep_response = requests.get(reputation_url, headers=headers, timeout=30)
-            
-            if rep_response.status_code == 200:
-                result['reputation'] = rep_response.json()
-            
-            # Get malware data
-            malware_url = f'https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/malware'
-            mal_response = requests.get(malware_url, headers=headers, timeout=30)
-            
-            if mal_response.status_code == 200:
-                result['malware'] = mal_response.json()
-            
-            return result
+            return response.json()
         else:
-            return {'error': f'OTX API request failed: {response.status_code}'}
-    
+            logger.error(f"Erreur IPInfo {response.status_code}: {response.text}")
+            return {'error': f"API Error {response.status_code}", 'details': response.json()}
     except Exception as e:
+        logger.error(f"Erreur requête IPInfo : {e}")
         return {'error': str(e)}
-
-
-def otx_scan_hash(hash_value):
-    """
-    Scan file hash with AlienVault OTX
-    
-    Args:
-        hash_value: File hash (MD5, SHA1, or SHA256)
-    
-    Returns:
-        dict: OTX API response or error dict
-    """
-    try:
-        headers = get_otx_headers()
-        
-        # Determine hash type
-        hash_type = 'file'
-        if len(hash_value) == 32:
-            hash_type = 'file'  # MD5
-        elif len(hash_value) == 40:
-            hash_type = 'file'  # SHA1
-        elif len(hash_value) == 64:
-            hash_type = 'file'  # SHA256
-        
-        url = f'https://otx.alienvault.com/api/v1/indicators/file/{hash_value}/general'
-        response = requests.get(url, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            
-            # Get analysis data
-            analysis_url = f'https://otx.alienvault.com/api/v1/indicators/file/{hash_value}/analysis'
-            analysis_response = requests.get(analysis_url, headers=headers, timeout=30)
-            
-            if analysis_response.status_code == 200:
-                result['analysis'] = analysis_response.json()
-            
-            return result
-        else:
-            return {'error': f'OTX API request failed: {response.status_code}'}
-    
-    except Exception as e:
-        return {'error': str(e)}
-
-
-# ==================== IP GEOLOCATION ====================
-
-def get_ip_info(ip):
-    """
-    Get IP geolocation and ASN information
-    Uses ipapi.co free API (no key required for basic usage)
-    
-    Args:
-        ip: IP address string
-    
-    Returns:
-        dict: IP information or None on error
-    """
-    try:
-        # Using ipapi.co (free tier: 1000 requests/day)
-        url = f'https://ipapi.co/{ip}/json/'
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            return {
-                'ip': data.get('ip'),
-                'city': data.get('city'),
-                'region': data.get('region'),
-                'country': data.get('country_name'),
-                'country_code': data.get('country_code'),
-                'latitude': data.get('latitude'),
-                'longitude': data.get('longitude'),
-                'org': data.get('org'),
-                'asn': data.get('asn'),
-                'timezone': data.get('timezone'),
-                'postal': data.get('postal'),
-            }
-        else:
-            # Fallback to ip-api.com (free, no key required)
-            fallback_url = f'http://ip-api.com/json/{ip}'
-            fallback_response = requests.get(fallback_url, timeout=10)
-            
-            if fallback_response.status_code == 200:
-                data = fallback_response.json()
-                if data.get('status') == 'success':
-                    return {
-                        'ip': data.get('query'),
-                        'city': data.get('city'),
-                        'region': data.get('regionName'),
-                        'country': data.get('country'),
-                        'country_code': data.get('countryCode'),
-                        'latitude': data.get('lat'),
-                        'longitude': data.get('lon'),
-                        'org': data.get('isp'),
-                        'asn': data.get('as'),
-                        'timezone': data.get('timezone'),
-                        'postal': data.get('zip'),
-                    }
-            
-            return None
-    
-    except Exception as e:
-        print(f"IP info error: {str(e)}")
-        return None
-
-
-# ==================== HELPER FUNCTIONS ====================
-
-def calculate_file_hash(file, algorithm='sha256'):
-    """
-    Calculate hash of uploaded file
-    
-    Args:
-        file: Django UploadedFile object
-        algorithm: Hash algorithm (md5, sha1, sha256)
-    
-    Returns:
-        str: Hex digest of file hash
-    """
-    file.seek(0)
-    
-    if algorithm == 'md5':
-        hasher = hashlib.md5()
-    elif algorithm == 'sha1':
-        hasher = hashlib.sha1()
-    else:
-        hasher = hashlib.sha256()
-    
-    for chunk in file.chunks():
-        hasher.update(chunk)
-    
-    file.seek(0)
-    return hasher.hexdigest()
-
-
-def is_valid_ipv4(ip):
-    """Validate IPv4 address"""
-    pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    if re.match(pattern, ip):
-        parts = ip.split('.')
-        return all(0 <= int(part) <= 255 for part in parts)
-    return False
-
-
-def is_private_ip(ip):
-    """Check if IP is private/internal"""
-    private_ranges = [
-        r'^10\.',
-        r'^172\.(1[6-9]|2[0-9]|3[0-1])\.',
-        r'^192\.168\.',
-        r'^127\.',
-        r'^169\.254\.',
-    ]
-    return any(re.match(pattern, ip) for pattern in private_ranges)

@@ -31,9 +31,25 @@ class CustomUserAdmin(UserAdmin):
 admin.site.register(User, CustomUserAdmin)
 
 # Enregistrez tous vos autres modèles (cette partie est la même qu'avant)
-admin.site.register(ThreatReport)
-admin.site.register(MitigationAction)
-admin.site.register(Task)
+@admin.register(ThreatReport)
+class ThreatReportAdmin(admin.ModelAdmin):
+    list_display = ('input_value', 'input_type', 'severity', 'status', 'analyst', 'assigned_to', 'created_at')
+    list_filter = ('status', 'severity', 'input_type', 'engine_used')
+    search_fields = ('input_value', 'analyst__username', 'assigned_to__username')
+
+@admin.register(Task)
+class TaskAdmin(admin.ModelAdmin):
+    list_display = ('title', 'priority', 'status', 'assigned_to', 'report')
+    list_filter = ('status', 'priority')
+
+@admin.register(MitigationAction)
+class MitigationActionAdmin(admin.ModelAdmin):
+    list_display = ('action_type', 'target_value', 'status', 'initiated_by', 'created_at')
+    list_filter = ('status', 'action_type')
+
+@admin.register(AWSConfiguration)
+class AWSConfigurationAdmin(admin.ModelAdmin):
+    list_display = ('name', 'aws_region', 'vpc_id', 'security_group_id', 'is_active')
+
 admin.site.register(Notification)
 admin.site.register(ThreatIntelligenceLog)
-admin.site.register(AWSConfiguration)

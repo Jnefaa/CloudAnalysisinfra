@@ -1,490 +1,476 @@
-import csv
-import io
-from datetime import datetime
-from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth.decorators import login_required
-from django.contrib import messages
-from django.http import HttpResponse, JsonResponse, FileResponse
-from django.db.models import Q, Count
-from django.core.paginator import Paginator
+import logging
 from django.conf import settings
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from django.http import FileResponse
+from django.shortcuts import get_object_or_404
 from pathlib import Path
+from rest_framework import viewsets, permissions, status
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.decorators import action
+from datetime import datetime
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import authenticate
+from rest_framework.permissions import AllowAny
+
 
 from .models import (
-    ThreatReport, MitigationAction, Task, Notification, 
-    ThreatIntelligenceLog, AWSConfiguration, User
+    User, ThreatReport, Task, MitigationAction, AWSConfiguration, Notification
 )
-# Assurez-vous que tous vos nouveaux formulaires sont importés
-from .forms import (
-    AnalysisForm, TaskForm, MitigationActionForm, AWSConfigurationForm,
-    ReportStatusUpdateForm, SearchFilterForm
+from .serializers import (
+    AnalysisInputSerializer,
+    ThreatReportSerializer,
+    TaskSerializer,
+    MitigationActionSerializer,
+    AWSConfigurationSerializer,
+    NotificationSerializer
 )
+from .permissions import IsAdminUser, IsAnalystUser, IsAdminOrOwner
 from .utils import (
-    detect_input_type, vt_scan_file, vt_scan_url, vt_scan_ip, vt_scan_hash,
+    detect_input_type, vt_scan_file, vt_scan_url, vt_scan_ip, vt_scan_hash, vt_scan_domain,
     otx_scan_url, otx_scan_ip, otx_scan_hash, get_ip_info
 )
-# ===================================================================
-# 1. IMPORTER LA NOUVELLE CLASSE AWSMANAGER
-# ===================================================================
 from .aws_integration import AWSManager
-from .notifications import send_notification
 
-import logging
+# Pour la génération de PDF
+# Vous devrez créer ces fichiers ou commenter les importations
+# from .pdf_generator import generate_pdf_report 
+# from .notifications import send_notification
+
+# --- Début des fonctions factices pour les importations ---
+# Commentez/Supprimez ceci lorsque vous créez les vrais fichiers
+def generate_pdf_report(report):
+    logger.warning("pdf_generator.py n'est pas implémenté.")
+    return None
+def send_notification(user_id, message):
+    logger.warning("notifications.py n'est pas implémenté.")
+    pass
+# --- Fin des fonctions factices ---
+
+
 logger = logging.getLogger(__name__)
 
 # ===================================================================
-# VUE DE REDIRECTION DE CONNEXION (CORRIGÉE)
+# VUE DE L'UTILISATEUR (Remplace celle de dj-rest-auth)
 # ===================================================================
-@login_required
-def redirect_user_view(request):
+# (Assurez-vous que 'UserDetailsSerializer' est configuré dans settings.py)
+# Aucune vue n'est nécessaire ici si 'USER_DETAILS_SERIALIZER' est défini.
+
+# ===================================================================
+# VUE D'ANALYSE PERSONNALISÉE
+# ===================================================================
+class CustomLoginView(APIView):
     """
-    Redirige l'utilisateur vers son tableau de bord approprié
-    en fonction de son rôle.
+    Custom login view without CSRF protection
     """
-    # Votre modèle utilise 'admin' et 'analyst'
-    if request.user.role == 'admin': 
-        return redirect('dashboard') # Redirige vers le nom d'URL 'dashboard'
-    else:
-        return redirect('analyze')
-
-# ==================== VUES ANALYSTE ====================
-
-@login_required
-def analyze(request):
-    """Vue d'analyse principale pour les analystes"""
-    # Empêche les admins de voir cette page
-    if request.user.role == 'admin':
-        return redirect('dashboard')
+    permission_classes = [AllowAny]
+    authentication_classes = []  # Disable authentication for this view
     
-    if request.method == 'POST':
-        form = AnalysisForm(request.POST, request.FILES)
-        if form.is_valid():
-            try:
-                # ... (logique d'analyse inchangée) ...
-                input_value = form.cleaned_data.get('input_value', '').strip()
-                uploaded_file = form.cleaned_data.get('file')
-                engine_choice = form.cleaned_data.get('engine_choice', 'vt')
-                
-                if uploaded_file:
-                    input_type = 'file'
-                    input_value = uploaded_file.name
-                elif input_value:
-                    input_type = detect_input_type(input_value)
-                else:
-                    messages.error(request, "Please provide input or upload a file")
-                    return redirect('analyze')
-                
-                report = ThreatReport.objects.create(
-                    analyst=request.user,
-                    input_type=input_type,
-                    input_value=input_value,
-                    file_name=uploaded_file.name if uploaded_file else None,
-                    engine_used=engine_choice,
-                    status='pending' # Statut initial
-                )
-                
-                vt_result = None
-                otx_result = None
-                ipinfo_result = None
-                
-                if engine_choice == 'vt':
-                    if uploaded_file:
-                        vt_result = vt_scan_file(uploaded_file)
-                    elif input_type == 'url':
-                        vt_result = vt_scan_url(input_value)
-                    elif input_type == 'ip':
-                        vt_result = vt_scan_ip(input_value)
-                    elif input_type == 'hash':
-                        vt_result = vt_scan_hash(input_value)
-                    
-                    if vt_result and 'error' not in vt_result:
-                        report.vt_data = vt_result
-                    else:
-                        messages.error(request, f"VirusTotal error: {vt_result.get('error', 'Unknown')}")
-                        report.delete()
-                        return redirect('analyze')
-                
-                elif engine_choice == 'otx':
-                    # ... (logique OTX inchangée) ...
-                    if input_type == 'url':
-                        otx_result = otx_scan_url(input_value)
-                    elif input_type == 'ip':
-                        otx_result = otx_scan_ip(input_value)
-                    elif input_type == 'hash':
-                        otx_result = otx_scan_hash(input_value)
-                    
-                    if otx_result and 'error' not in otx_result:
-                         report.otx_data = otx_result
-                    else:
-                         messages.error(request, f"OTX error: {otx_result.get('error', 'Unknown')}")
-                         report.delete()
-                         return redirect('analyze')
-                
-                if input_type == 'ip':
-                    ipinfo_result = get_ip_info(input_value)
-                    if ipinfo_result:
-                        report.ipinfo_data = ipinfo_result
-                
-                report.calculate_threat_score()
-                
-                # Générer le PDF (vérifiez que les dossiers media/reports/pdf existent)
-                try:
-                    pdf_path = generate_pdf_report(report)
-                    report.pdf_report = pdf_path
-                except Exception as e:
-                    logger.error(f"Erreur lors de la génération du PDF : {e}")
-                    messages.warning(request, f"Analyse terminée, mais le PDF n'a pas pu être généré : {e}")
-
-                # Log to CSV
-                # log_to_csv(report) # Optionnel, peut être activé
-                # report.csv_logged = True
-                
-                report.save()
-                
-                messages.success(request, f"Analysis completed! Threat Score: {report.threat_score:.1f}/100")
-                return redirect('report_detail', report_id=report.id)
-                
-            except Exception as e:
-                logger.error(f"Analysis error: {str(e)}")
-                messages.error(request, f"Analysis error: {str(e)}")
-    else:
-        form = AnalysisForm()
-    
-    recent_reports = ThreatReport.objects.filter(analyst=request.user).order_by('-created_at')[:5]
-    
-    return render(request, 'analyst/analyze.html', {
-        'form': form,
-        'recent_reports': recent_reports
-    })
-
-@login_required
-def report_detail(request, report_id):
-    """Voir le rapport détaillé (pour Analyste ET Admin)"""
-    report = get_object_or_404(ThreatReport, id=report_id)
-    
-    # === Logique de Permission Corrigée ===
-    is_owner = (report.analyst == request.user)
-    is_assigned = (report.assigned_to == request.user)
-    is_admin_role = (request.user.role == 'admin')
-
-    if not (is_owner or is_assigned or is_admin_role):
-        messages.error(request, "You don't have permission to view this report")
-        return redirect('user_redirect') # Renvoie à la page de redirection
-    
-    # Logique pour le formulaire de mise à jour de statut de l'Admin
-    status_form = None
-    if request.user.role == 'admin':
-        if request.method == 'POST' and 'update_status' in request.POST:
-            # S'assure d'utiliser le bon nom de formulaire de votre forms.py
-            status_form = ReportStatusUpdateForm(request.POST)
-            if status_form.is_valid():
-                report.status = status_form.cleaned_data['status']
-                report.notes = f"{report.notes}\n\n[Admin Note]: {status_form.cleaned_data['notes']}"
-                report.reviewed_at = datetime.now()
-                report.save()
-                messages.success(request, "Statut du rapport mis à jour.")
-                return redirect('report_detail', report_id=report.id)
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
         
-        # Prépare le formulaire pour l'affichage (méthode GET ou échec de validation)
-        status_form = ReportStatusUpdateForm(initial={
-            'status': report.status,
-            'notes': '' 
-        })
-
-    tasks = report.tasks.all()
-    mitigations = report.mitigations.all()
-    
-    return render(request, 'analyst/report_detail.html', {
-        'report': report,
-        'tasks': tasks,
-        'mitigations': mitigations,
-        'status_form': status_form # Ajouté pour l'admin
-    })
-
-
-@login_required
-def send_to_admin(request, report_id):
-    """Envoyer le rapport à un administrateur"""
-    report = get_object_or_404(ThreatReport, id=report_id)
-    
-    # Seuls les analystes peuvent envoyer des rapports
-    if request.user.role != 'analyst':
-        messages.error(request, "Permission denied")
-        return redirect('user_redirect') # Redirige vers son propre tableau de bord
-    
-    # Un analyste ne peut envoyer que ses propres rapports
-    if report.analyst != request.user:
-         messages.error(request, "You can only send your own reports")
-         return redirect('analyze')
-
-    admins = User.objects.filter(role='admin')
-    
-    if request.method == 'POST':
-        admin_id = request.POST.get('admin_id')
-        notes = request.POST.get('notes', '')
+        if not username or not password:
+            return Response(
+                {'error': 'Please provide both username and password'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        if not admin_id:
-            messages.error(request, "Veuillez sélectionner un administrateur.")
-            return render(request, 'analyst/send_to_admin.html', {
-                'report': report,
-                'admins': admins
+        user = authenticate(username=username, password=password)
+        
+        if user is not None:
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'role': getattr(user, 'role', None),
+                    'is_staff': user.is_staff,
+                    'is_superuser': user.is_superuser,
+                }
             })
+        else:
+            return Response(
+                {'error': 'Invalid credentials'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
 
-        admin = get_object_or_404(User, id=admin_id, role='admin')
+class AnalyzeView(APIView):
+    """
+    Point de terminaison API personnalisé pour lancer une nouvelle analyse.
+    Accessible uniquement aux Analystes.
+    """
+    permission_classes = [IsAnalystUser]
+
+    def post(self, request, *args, **kwargs):
+        # Étape 1 : Valider l'entrée
+        serializer = AnalysisInputSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
+        validated_data = serializer.validated_data
+        input_value = validated_data.get('input_value', '').strip()
+        uploaded_file = validated_data.get('file')
+        engine_choice = validated_data.get('engine_choice', 'vt')
+
+        # Étape 2 : Déterminer le type d'entrée
+        if uploaded_file:
+            input_type = 'file'
+            input_value = uploaded_file.name
+        elif input_value:
+            input_type = detect_input_type(input_value)
+            if input_type == 'unknown':
+                return Response({'error': 'Type d\'indicateur inconnu.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+             return Response({'error': 'Entrée ou fichier requis.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Étape 3 : Créer l'objet Rapport initial
+        report = ThreatReport.objects.create(
+            analyst=request.user,
+            input_type=input_type,
+            input_value=input_value,
+            file_name=uploaded_file.name if uploaded_file else None,
+            engine_used=engine_choice,
+            status='pending'
+        )
+
+        # Étape 4 : Lancer les scans (Logique déplacée depuis l'ancienne vue)
+        # C'EST UNE OPÉRATION LONGUE !
+        # Idéalement, ceci devrait être une tâche Celery (asynchrone).
+        # Pour l'instant, nous le faisons de manière synchrone.
+        vt_result, otx_result, ipinfo_result = None, None, None
+        
+        try:
+            if engine_choice == 'vt':
+                if input_type == 'file':
+                    vt_result = vt_scan_file(uploaded_file)
+                elif input_type == 'url':
+                    vt_result = vt_scan_url(input_value) # Attention : peut nécessiter un délai
+                elif input_type == 'ip':
+                    vt_result = vt_scan_ip(input_value)
+                elif input_type == 'hash':
+                    vt_result = vt_scan_hash(input_value)
+                elif input_type == 'domain':
+                    vt_result = vt_scan_domain(input_value)
+                
+                if vt_result and 'error' in vt_result:
+                    raise Exception(f"VirusTotal Error: {vt_result.get('error', 'Unknown')}")
+                report.vt_data = vt_result
+
+            elif engine_choice == 'otx':
+                if input_type == 'ip':
+                    otx_result = otx_scan_ip(input_value)
+                elif input_type == 'url':
+                    otx_result = otx_scan_url(input_value)
+                elif input_type == 'hash':
+                    otx_result = otx_scan_hash(input_value)
+                
+                if otx_result and 'error' in otx_result:
+                    raise Exception(f"OTX Error: {otx_result.get('error', 'Unknown')}")
+                report.otx_data = otx_result
+
+            if input_type == 'ip':
+                ipinfo_result = get_ip_info(input_value)
+                if ipinfo_result and 'error' not in ipinfo_result:
+                    report.ipinfo_data = ipinfo_result
+
+            # Étape 5 : Calculer le score et sauvegarder
+            report.calculate_threat_score()
+            report.save()
+
+            # Étape 6 : Renvoyer le rapport complet
+            output_serializer = ThreatReportSerializer(report)
+            return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            # Nettoyer si l'analyse échoue
+            report.delete()
+            logger.error(f"Erreur d'analyse API : {e}")
+            return Response({'error': f"Erreur d'analyse : {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ===================================================================
+# VIEWSETS API POUR LES MODÈLES
+# ===================================================================
+
+class ThreatReportViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API pour lister et récupérer les ThreatReports.
+    - Analystes : voient leurs propres rapports.
+    - Admins : voient les rapports qui leur sont assignés.
+    """
+    serializer_class = ThreatReportSerializer
+    permission_classes = [permissions.IsAuthenticated] # La permission est dans le queryset
+
+    def get_queryset(self):
+        user = self.request.user
+        if not hasattr(user, 'role'): # Au cas où l'utilisateur n'est pas entièrement configuré
+             return ThreatReport.objects.none()
+             
+        if user.role == 'admin':
+            # Les admins voient les rapports qui leur sont assignés
+            return ThreatReport.objects.filter(assigned_to=user)
+        elif user.role == 'analyst':
+            # Les analystes voient les rapports qu'ils ont créés
+            return ThreatReport.objects.filter(analyst=user)
+        return ThreatReport.objects.none()
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAnalystUser])
+    def send_to_admin(self, request, pk=None):
+        """
+        Action personnalisée : POST /api/v1/reports/{id}/send_to_admin/
+        Attribution du rapport à un admin.
+        """
+        report = self.get_object() # Utilise get_queryset, donc l'analyste doit être propriétaire
+        admin_id = request.data.get('admin_id')
+        notes = request.data.get('notes', '')
+
+        if not admin_id:
+            return Response({'error': 'admin_id requis.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            admin = User.objects.get(id=admin_id, role='admin')
+        except User.DoesNotExist:
+            return Response({'error': 'Administrateur non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
+
         report.assigned_to = admin
         report.notes = f"[Analyst Note]: {notes}"
-        report.status = 'pending' # S'assurer que le statut est "pending"
+        report.status = 'pending'
         report.save()
         
         Notification.objects.create(
             recipient=admin,
             notification_type='new_report',
-            title=f'New Threat Report: {report.input_type.upper()}',
-            message=f'Analyst {request.user.username} sent you a {report.severity} severity report for review.',
+            title=f'Nouveau Rapport de Menace: {report.input_type.upper()}',
+            message=f"L'analyste {request.user.username} vous a envoyé un rapport ({report.severity}) pour examen.",
             report=report
         )
         
-        # send_notification(admin.id, { ... }) # Pour WebSocket
-        
-        messages.success(request, f"Rapport envoyé à {admin.username}")
-        return redirect('report_detail', report_id=report.id)
+        return Response({'success': True, 'message': f'Rapport assigné à {admin.username}'})
     
-    return render(request, 'analyst/send_to_admin.html', {
-        'report': report,
-        'admins': admins
-    })
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def update_status(self, request, pk=None):
+        """
+        Action personnalisée : POST /api/v1/reports/{id}/update_status/
+        Permet à un admin de changer le statut d'un rapport.
+        """
+        report = self.get_object() # Vérifie que l'admin est assigné
+        status_val = request.data.get('status')
+        notes = request.data.get('notes', '')
 
-@login_required
-def create_task(request, report_id):
-    """Créer une tâche à partir d'un rapport"""
-    report = get_object_or_404(ThreatReport, id=report_id)
-    
-    if request.method == 'POST':
-        form = TaskForm(request.POST)
-        if form.is_valid():
-            task = form.save(commit=False)
-            task.report = report
-            task.created_by = request.user
-            task.save()
+        if not status_val in ['reviewed', 'mitigated', 'false_positive']:
+            return Response({'error': 'Statut non valide.'}, status=status.HTTP_400_BAD_REQUEST)
             
-            # Notifier l'utilisateur assigné (qui peut être un admin)
-            if task.assigned_to:
-                Notification.objects.create(
-                    recipient=task.assigned_to,
-                    notification_type='task_assigned',
-                    title=f'New Task Assigned: {task.title}',
-                    message=f'{request.user.username} assigned you a {task.priority} priority task.',
-                    task=task,
-                    report=report
-                )
-            
-            messages.success(request, "Task created successfully")
-            return redirect('report_detail', report_id=report.id)
-    else:
-        # Prépare le formulaire ; le __init__ du TaskForm filtre déjà les utilisateurs
-        form = TaskForm()
-    
-    return render(request, 'analyst/create_task.html', {
-        'form': form,
-        'report': report
-    })
-
-# ==================== VUES ADMIN ====================
-
-@login_required
-def admin_dashboard(request):
-    """Tableau de bord de l'administrateur"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-    
-    # Ne montre que les éléments assignés à CET admin
-    assigned_reports = ThreatReport.objects.filter(assigned_to=request.user)
-    assigned_tasks = Task.objects.filter(assigned_to=request.user)
-
-    pending_reports = assigned_reports.filter(status='pending').count()
-    critical_reports = assigned_reports.filter(severity='critical').count()
-    open_tasks = assigned_tasks.filter(status='open').count()
-    
-    reports = assigned_reports.order_by('-created_at')[:10]
-    
-    notifications = Notification.objects.filter(
-        recipient=request.user,
-        is_read=False
-    ).order_by('-created_at')[:5]
-    
-    severity_stats = assigned_reports.values('severity').annotate(count=Count('severity'))
-    
-    context = {
-        'pending_reports': pending_reports,
-        'critical_reports': critical_reports,
-        'open_tasks': open_tasks,
-        'reports': reports,
-        'notifications': notifications,
-        'severity_stats': severity_stats
-    }
-    
-    return render(request, 'admin/dashboard.html', context)
-
-@login_required
-def admin_reports(request):
-    """Voir tous les rapports assignés (avec filtre)"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-    
-    # Base Query: UNIQUEMENT les rapports assignés à l'utilisateur
-    reports = ThreatReport.objects.filter(assigned_to=request.user)
-    
-    filter_form = SearchFilterForm(request.GET)
-    
-    if filter_form.is_valid():
-        search = filter_form.cleaned_data.get('search')
-        severity = filter_form.cleaned_data.get('severity')
-        status = filter_form.cleaned_data.get('status')
-
-        if severity:
-            reports = reports.filter(severity=severity)
-        if status:
-            reports = reports.filter(status=status)
-        if search:
-            reports = reports.filter(
-                Q(input_value__icontains=search) |
-                Q(notes__icontains=search) |
-                Q(analyst__username__icontains=search)
-            )
-            
-    # Pagination
-    paginator = Paginator(reports.order_by('-created_at'), 20)
-    page = request.GET.get('page')
-    reports_page = paginator.get_page(page)
-    
-    return render(request, 'admin/reports.html', {
-        'reports': reports_page,
-        'filter_form': filter_form
-    })
-
-@login_required
-def review_report(request, report_id):
-    """Examiner et prendre une décision sur un rapport"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-    
-    try:
-        report = get_object_or_404(ThreatReport, id=report_id, assigned_to=request.user)
-    except Exception:
-        messages.error(request, "Rapport non trouvé ou non assigné à vous.")
-        return redirect('dashboard')
+        report.status = status_val
+        report.notes += f"\n\n[Admin Note]: {notes}"
+        report.reviewed_at = datetime.now()
+        report.save()
         
-    if request.method == 'POST':
-        action = request.POST.get('action')
+        # Notifier l'analyste
+        Notification.objects.create(
+            recipient=report.analyst,
+            notification_type='report_updated',
+            title=f'Rapport mis à jour : {report.input_value[:20]}...',
+            message=f"L'administrateur {request.user.username} a mis à jour le statut de votre rapport à : {report.get_status_display()}.",
+            report=report
+        )
         
-        if action == 'approve':
-            report.status = 'reviewed'
-            report.reviewed_at = datetime.now()
+        return Response(ThreatReportSerializer(report).data)
+
+
+    @action(detail=True, methods=['get'], permission_classes=[IsAdminOrOwner])
+    def download_pdf(self, request, pk=None):
+        """
+        Action personnalisée : GET /api/v1/reports/{id}/download_pdf/
+        """
+        report = self.get_object()
+        if report.pdf_report:
+            try:
+                return FileResponse(report.pdf_report.open(), as_attachment=True, filename=f'report_{report.id}.pdf')
+            except FileNotFoundError:
+                return Response({'error': 'Fichier PDF non trouvé.'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Si le PDF n'existe pas, générez-le
+        try:
+            pdf_path = generate_pdf_report(report) # Assurez-vous d'avoir importé pdf_generator.py
+            report.pdf_report = pdf_path
             report.save()
-            messages.success(request, "Rapport examiné et approuvé.")
-        
-        elif action == 'false_positive':
-            report.status = 'false_positive'
-            report.reviewed_at = datetime.now()
-            report.save()
-            messages.info(request, "Rapport marqué comme Faux Positif.")
-        
-        return redirect('report_detail', report_id=report.id)
-    
-    # Si ce n'est pas POST, rediriger simplement vers la page de détails
-    return redirect('report_detail', report_id=report.id)
+            return FileResponse(report.pdf_report.open(), as_attachment=True, filename=f'report_{report.id}.pdf')
+        except Exception as e:
+            logger.error(f"Erreur lors de la génération du PDF (à la volée) : {e}")
+            return Response({'error': f'Erreur de génération PDF : {e}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-@login_required
-def create_mitigation(request, report_id):
-    """Créer une action de mitigation (AWS)"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-    
-    report = get_object_or_404(ThreatReport, id=report_id)
-    
-    if request.method == 'POST':
-        form = MitigationActionForm(request.POST)
-        if form.is_valid():
-            mitigation = form.save(commit=False)
-            mitigation.report = report
-            mitigation.initiated_by = request.user
-            mitigation.status = 'pending' # Statut initial
-            mitigation.save()
-            
-            # ===================================================================
-            # 2. APPEL DÉCOMMENTÉ
-            # ===================================================================
-            if form.cleaned_data.get('execute_now'):
-                result = execute_mitigation(mitigation) # Appel de la fonction
-                if result['success']:
-                    messages.success(request, f"Action de mitigation exécutée : {result['message']}")
-                else:
-                    messages.error(request, f"Échec de la mitigation : {result['error']}")
-            
-            else:
-                messages.success(request, "Action de mitigation créée (en attente d'exécution).")
-                
-            return redirect('report_detail', report_id=report.id)
-    else:
-        # Prépare le formulaire avec les données du rapport
-        initial_data = {
-            'target_value': report.input_value,
-            'description': f'Mitigation pour le rapport {report.id} concernant {report.input_value}'
-        }
-        if report.input_type == 'ip':
-            initial_data['action_type'] = 'block_ip'
-        elif report.input_type == 'url':
-            initial_data['action_type'] = 'block_domain'
+
+class TaskViewSet(viewsets.ModelViewSet):
+    """
+    API pour gérer les Tâches (CRUD complet).
+    """
+    serializer_class = TaskSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrOwner]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not hasattr(user, 'role'):
+             return Task.objects.none()
+
+        if user.role == 'admin':
+            # Les admins voient les tâches liées aux rapports qui leur sont assignés
+            return Task.objects.filter(report__assigned_to=user)
+        elif user.role == 'analyst':
+            # Les analystes voient les tâches liées aux rapports qu'ils ont créés
+            return Task.objects.filter(report__analyst=user)
+        return Task.objects.none()
+
+    def get_serializer_context(self):
+        # Transmet 'request' au serializer pour 'created_by'
+        return {'request': self.request}
+
+
+class MitigationActionViewSet(viewsets.ModelViewSet):
+    """
+    API pour gérer les Actions de Mitigation.
+    Accessible uniquement aux Admins.
+    """
+    serializer_class = MitigationActionSerializer
+    permission_classes = [IsAdminUser] # Seuls les admins peuvent gérer les mitigations
+
+    def get_queryset(self):
+        # Les admins voient toutes les mitigations
+        return MitigationAction.objects.all()
+
+    def get_serializer_context(self):
+        return {'request': self.request}
+
+    @action(detail=True, methods=['post'])
+    def execute(self, request, pk=None):
+        """
+        Action personnalisée : POST /api/v1/mitigations/{id}/execute/
+        Exécute l'action AWS.
+        """
+        mitigation = self.get_object()
+        if mitigation.status == 'completed':
+            return Response({'warning': 'Cette mitigation a déjà été exécutée.'}, status=status.HTTP_400_BAD_REQUEST)
         
-        form = MitigationActionForm(initial=initial_data)
+        # La logique est dans une fonction séparée pour la réutilisation
+        result = execute_mitigation(mitigation)
+        
+        if result['success']:
+            return Response({'success': True, 'message': result.get('message', 'Action exécutée.')})
+        else:
+            return Response({'error': result.get('error', 'Erreur inconnue.')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AWSConfigurationViewSet(viewsets.ViewSet):
+    """
+    API pour gérer la Configuration AWS.
+    Accessible uniquement aux Admins.
+    Utilise ViewSet car nous n'avons qu'un seul objet 'default_config'.
+    """
+    serializer_class = AWSConfigurationSerializer
+    permission_classes = [IsAdminUser]
     
-    return render(request, 'admin/create_mitigation.html', {
-        'form': form,
-        'report': report
-    })
+    def get_object(self):
+        # Obtient ou crée la configuration nommée 'default_config'
+        config, created = AWSConfiguration.objects.get_or_create(
+            name='default_config',
+            defaults={'aws_region': 'us-east-1', 'is_active': True}
+        )
+        return config
+
+    def list(self, request):
+        """
+        GET /api/v1/aws-config/
+        Récupère la configuration 'default_config'.
+        """
+        config = self.get_object()
+        serializer = self.serializer_class(config)
+        return Response(serializer.data)
+
+    def update(self, request, pk=None):
+        """
+        PUT /api/v1/aws-config/default_config/
+        Met à jour la configuration 'default_config'.
+        (pk est ignoré, nous utilisons toujours 'default_config')
+        """
+        config = self.get_object()
+        serializer = self.serializer_class(config, data=request.data, partial=True) # partial=True
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['post'])
+    def test_credentials(self, request):
+        """
+        POST /api/v1/aws-config/test_credentials/
+        Teste les credentials AWS actuellement sauvegardés.
+        """
+        config = self.get_object()
+        aws_manager = AWSManager(config)
+        test_result = aws_manager.test_credentials()
+        if test_result['success']:
+            return Response(test_result)
+        else:
+            return Response(test_result, status=status.HTTP_400_BAD_REQUEST)
+
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API pour lister les notifications non lues de l'utilisateur.
+    """
+    serializer_class = NotificationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # Renvoie uniquement les notifications non lues pour l'utilisateur connecté
+        return Notification.objects.filter(recipient=self.request.user, is_read=False)
+        
+    @action(detail=True, methods=['post'])
+    def mark_as_read(self, request, pk=None):
+        """
+        Action personnalisée : POST /api/v1/notifications/{id}/mark_as_read/
+        """
+        notification = self.get_object()
+        if notification.recipient == request.user:
+            notification.is_read = True
+            notification.save()
+            return Response({'success': True, 'message': 'Notification marquée comme lue.'})
+        else:
+            return Response({'error': 'Permission refusée.'}, status=status.HTTP_403_FORBIDDEN)
+
 
 # ===================================================================
-# 3. NOUVELLE FONCTION 'execute_mitigation'
+# LOGIQUE D'EXÉCUTION (déplacée depuis l'ancienne vue)
 # ===================================================================
 def execute_mitigation(mitigation):
     """
     Exécute une action de mitigation en utilisant le AWSManager.
+    Met à jour l'objet mitigation avec le résultat.
     """
     logger.info(f"Exécution de la mitigation ID {mitigation.id}...")
     
-    # Étape 1 : Récupérer la configuration AWS active
-    # Utilise la configuration nommée 'default_config' que vous avez créée
     try:
         aws_config = AWSConfiguration.objects.get(name='default_config', is_active=True)
         logger.info(f"Utilisation de la configuration AWS : {aws_config.name}")
     except AWSConfiguration.DoesNotExist:
-        logger.error("Aucune configuration AWS active nommée 'default_config' trouvée.")
+        error_msg = "Aucune configuration AWS active nommée 'default_config' trouvée."
+        logger.error(error_msg)
         mitigation.status = 'failed'
-        mitigation.error_message = "Aucune configuration AWS active nommée 'default_config' trouvée."
+        mitigation.error_message = error_msg
         mitigation.save()
-        return {'success': False, 'error': mitigation.error_message}
+        return {'success': False, 'error': error_msg}
     except Exception as e:
-        logger.error(f"Erreur lors de la récupération de la configuration AWS : {e}")
+        error_msg = f"Erreur lors de la récupération de la configuration AWS : {e}"
+        logger.error(error_msg)
         mitigation.status = 'failed'
         mitigation.error_message = str(e)
         mitigation.save()
         return {'success': False, 'error': str(e)}
 
-    # Étape 2 : Initialiser le Manager AWS
+    # Initialiser le Manager AWS
     aws_manager = AWSManager(aws_config)
-    
-    # Étape 3 : Exécuter l'action basée sur le type
     result = {'success': False, 'error': 'Type d\'action inconnu'}
     try:
         if mitigation.action_type == 'block_ip':
@@ -493,18 +479,30 @@ def execute_mitigation(mitigation):
                 description=mitigation.description
             )
         
-        elif mitigation.action_type == 'block_domain':
-            # TODO: Implémenter block_ip_in_waf (ou similaire)
-            result = {'success': False, 'error': 'Le blocage de domaine (WAF) n\'est pas encore implémenté.'}
-            
-        # ... (Ajouter d'autres types d'action ici) ...
+        elif mitigation.action_type == 'allow_ip': # Action pour autoriser
+             result = aws_manager.allow_ip_in_security_group(
+                ip_address=mitigation.target_value,
+                description=mitigation.description
+            )
 
-        # Étape 4 : Mettre à jour l'enregistrement de mitigation avec le résultat
+        elif mitigation.action_type == 'block_domain':
+            # Vous devez d'abord résoudre le domaine en IP
+            # import socket
+            # try:
+            #   ip_address = socket.gethostbyname(mitigation.target_value)
+            #   result = aws_manager.block_ip_in_waf(ip_address)
+            # except socket.gaierror:
+            #   result = {'success': False, 'error': 'Impossible de résoudre le domaine'}
+            result = {'success': False, 'error': 'Le blocage de domaine (WAF) n\'est pas encore implémenté.'}
+        
+        # ... (Appels aux autres fonctions de aws_integration.py) ...
+        
         if result['success']:
             mitigation.status = 'completed'
             mitigation.completed_at = datetime.now()
-            mitigation.report.status = 'mitigated' # Met aussi à jour le rapport
-            mitigation.report.save()
+            if mitigation.report:
+                mitigation.report.status = 'mitigated'
+                mitigation.report.save()
         else:
             mitigation.status = 'failed'
             mitigation.error_message = result.get('error', 'Erreur inconnue')
@@ -513,228 +511,9 @@ def execute_mitigation(mitigation):
         return result
 
     except Exception as e:
+        error_msg = f"Erreur système : {e}"
         logger.error(f"Erreur critique lors de l'exécution de la mitigation {mitigation.id}: {e}")
         mitigation.status = 'failed'
-        mitigation.error_message = f"Erreur système : {e}"
+        mitigation.error_message = error_msg
         mitigation.save()
-        return {'success': False, 'error': str(e)}
-
-
-# ==================== NOUVELLES VUES ADMIN ====================
-
-@login_required
-def admin_tasks_list(request):
-    """Affiche une liste de toutes les tâches assignées à l'admin"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-        
-    tasks = Task.objects.filter(assigned_to=request.user).order_by('-created_at')
-    
-    # TODO: Ajouter un formulaire de filtre pour les tâches
-    
-    paginator = Paginator(tasks, 20)
-    page = request.GET.get('page')
-    tasks_page = paginator.get_page(page)
-    
-    return render(request, 'admin/tasks_list.html', {
-        'tasks': tasks_page
-    })
-
-# ===================================================================
-# === NOUVELLE FONCTION (La fonction manquante) ===
-# ===================================================================
-@login_required
-def admin_mitigations_list(request):
-    """Affiche une liste de toutes les actions de mitigation"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-        
-    # L'admin peut voir TOUTES les mitigations (pas seulement les siennes)
-    mitigations = MitigationAction.objects.all().order_by('-created_at')
-    
-    paginator = Paginator(mitigations, 20)
-    page = request.GET.get('page')
-    mitigations_page = paginator.get_page(page)
-    
-    return render(request, 'admin/mitigations_list.html', {
-        'mitigations': mitigations_page
-    })
-# ===================================================================
-
-
-@login_required
-def aws_config_view(request):
-    """Gère la configuration AWS"""
-    if request.user.role != 'admin':
-        messages.error(request, "Accès administrateur requis")
-        return redirect('analyze')
-
-    # Utilise le nom 'default_config' pour obtenir ou créer la configuration
-    config, created = AWSConfiguration.objects.get_or_create(
-        name='default_config',
-        defaults={'aws_region': 'us-east-1'} # Valeur par défaut si elle est créée
-    )
-
-    if request.method == 'POST':
-        # S'assure d'utiliser le bon nom de formulaire de votre forms.py
-        form = AWSConfigurationForm(request.POST, instance=config)
-        if form.is_valid():
-            form.save()
-            messages.success(request, "Configuration AWS sauvegardée avec succès.")
-            
-            # Tester la connexion après la sauvegarde
-            aws_manager = AWSManager(config)
-            test_result = aws_manager.test_credentials()
-            if test_result['success']:
-                messages.success(request, f"Test de connexion AWS : {test_result['message']}")
-            else:
-                messages.error(request, f"Échec du test de connexion : {test_result['error']}")
-                
-            return redirect('aws_config')
-    else:
-        form = AWSConfigurationForm(instance=config)
-
-    return render(request, 'admin/aws_config.html', {
-        'form': form
-    })
-
-# ==================== FONCTIONS UTILITAIRES ====================
-
-def generate_pdf_report(report):
-    """Génère un rapport PDF"""
-    # S'assurer que le dossier existe
-    pdf_dir = f'{settings.MEDIA_ROOT}/reports/pdf/'
-    Path(pdf_dir).mkdir(parents=True, exist_ok=True)
-    
-    filename = f'report_{report.id}.pdf'
-    filepath_relative = f'reports/pdf/{filename}'
-    filepath_absolute = f'{settings.MEDIA_ROOT}/{filepath_relative}'
-    
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch)
-    
-    story = []
-    styles = getSampleStyleSheet()
-    
-    # ... (Styles PDF inchangés) ...
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        textColor=colors.HexColor('#C41E3A'),
-        alignment=TA_CENTER
-    )
-    
-    story.append(Paragraph("THREAT INTELLIGENCE REPORT", title_style))
-    story.append(Spacer(1, 0.3*inch))
-    
-    # Info Rapport
-    info_data = [
-        ['Report ID:', str(report.id)],
-        ['Analyst:', report.analyst.username],
-        ['Date:', report.created_at.strftime('%Y-%m-%d %H:%M:%S')],
-        ['Input Type:', report.get_input_type_display()],
-        ['Input Value:', report.input_value],
-        ['Severity:', report.get_severity_display()],
-        ['Threat Score:', f"{report.threat_score:.1f}/100"],
-    ]
-    
-    info_table = Table(info_data, colWidths=[2*inch, 4*inch])
-    info_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (0, -1), colors.grey),
-        ('TEXTCOLOR', (0, 0), (0, -1), colors.whitesmokey),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black)
-    ]))
-    story.append(info_table)
-    story.append(Spacer(1, 0.3*inch))
-    
-    # ... (Logique d'ajout de données VT/OTX inchangée) ...
-    if report.engine_used == 'vt' and report.vt_data and 'data' in report.vt_data:
-        story.append(Paragraph("VirusTotal Analysis", styles['Heading2']))
-        stats = report.vt_data.get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
-        vt_data = [
-            ['Malicious:', str(stats.get('malicious', 0))],
-            ['Suspicious:', str(stats.get('suspicious', 0))],
-            ['Undetected:', str(stats.get('undetected', 0))],
-            ['Harmless:', str(stats.get('harmless', 0))],
-        ]
-        vt_table = Table(vt_data, colWidths=[2*inch, 4*inch])
-        vt_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-        ]))
-        story.append(vt_table)
-
-    
-    doc.build(story)
-    
-    # Sauvegarder le fichier sur le disque
-    with open(filepath_absolute, 'wb') as f:
-        f.write(buffer.getvalue())
-    
-    return filepath_relative # Retourne le chemin relatif pour le modèle
-
-
-def log_to_csv(report):
-    """Log report to CSV file"""
-    # ... (Logique CSV inchangée) ...
-    pass
-
-@login_required
-def download_pdf(request, report_id):
-    """Download PDF report"""
-    report = get_object_or_404(ThreatReport, id=report_id)
-    
-    # Vérification des permissions
-    is_owner = (report.analyst == request.user)
-    is_assigned = (report.assigned_to == request.user)
-    is_admin_role = (request.user.role == 'admin')
-    
-    if not (is_owner or is_assigned or is_admin_role):
-        messages.error(request, "Permission denied")
-        return redirect('user_redirect')
-
-    if report.pdf_report:
-        try:
-            # Ouvre le fichier depuis le stockage (media)
-            return FileResponse(report.pdf_report.open(), as_attachment=True, filename=f'report_{report.id}.pdf')
-        except FileNotFoundError:
-            messages.error(request, "Le fichier PDF n'a pas été trouvé sur le serveur.")
-            return redirect('report_detail', report_id=report.id)
-        except Exception as e:
-            messages.error(request, f"Erreur lors de l'ouverture du PDF : {e}")
-            return redirect('report_detail', report_id=report.id)
-    else:
-        messages.error(request, "PDF non disponible pour ce rapport.")
-        return redirect('report_detail', report_id=report.id)
-
-@login_required
-def export_csv(request):
-    """Export threat intelligence logs to CSV"""
-    response = HttpResponse(content_type='text/csv')
-    response['Content-Disposition'] = 'attachment; filename="threat_intelligence_export.csv"'
-    
-    logs = ThreatIntelligenceLog.objects.all().order_by('-timestamp')
-    
-    writer = csv.writer(response)
-    writer.writerow([
-        'Timestamp', 'Indicator', 'Type', 'Threat Score', 'Severity',
-        'Malicious Count', 'Suspicious Count', 'Country', 'ASN',
-        'Pulse Count', 'VT Positives', 'Analyst', 'Notes'
-    ])
-    
-    for log in logs:
-        writer.writerow([
-            log.timestamp, log.indicator, log.indicator_type, log.threat_score,
-            log.severity, log.malicious_count, log.suspicious_count,
-            log.country, log.asn, log.pulse_count, log.vt_positives,
-            log.analyst, log.notes
-        ])
-    
-    return response
+        return {'success': False, 'error': error_msg}

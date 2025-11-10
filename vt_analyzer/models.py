@@ -12,9 +12,9 @@ class User(AbstractUser):
     department = models.CharField(max_length=100, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     
-    # The 'class Meta' with 'db_table = "auth_user"' has been removed.
-    # This was the fix. Django will now create the default
-    # table name 'vt_analyzer_user', which is correct.
+    # Note : Nous n'utilisons plus db_table = 'auth_user'
+    class Meta:
+        db_table = 'vt_analyzer_user' # Nom de table correct
 
 class ThreatReport(models.Model):
     SEVERITY_CHOICES = [
@@ -37,6 +37,7 @@ class ThreatReport(models.Model):
         ('url', 'URL'),
         ('hash', 'File Hash'),
         ('file', 'File Upload'),
+        ('domain', 'Domain'), # Ajouté pour plus de clarté
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -54,7 +55,7 @@ class ThreatReport(models.Model):
     ipinfo_data = models.JSONField(null=True, blank=True)
     
     # Threat assessment
-    severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES)
+    severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='info')
     malicious_count = models.IntegerField(default=0)
     suspicious_count = models.IntegerField(default=0)
     undetected_count = models.IntegerField(default=0)
@@ -88,7 +89,7 @@ class ThreatReport(models.Model):
     
     def calculate_threat_score(self):
         """Calculate threat score based on detection results"""
-        if self.engine_used == 'vt' and self.vt_data:
+        if self.engine_used == 'vt' and self.vt_data and 'data' in self.vt_data:
             stats = self.vt_data.get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
             malicious = stats.get('malicious', 0)
             suspicious = stats.get('suspicious', 0)
@@ -132,7 +133,8 @@ class ThreatReport(models.Model):
                 self.severity = 'info'
                 self.threat_score = 0
         
-        self.save()
+        # N'appelle pas self.save() ici, la vue s'en chargera
+        # self.save()
 
 class MitigationAction(models.Model):
     ACTION_TYPES = [
@@ -151,7 +153,8 @@ class MitigationAction(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    report = models.ForeignKey(ThreatReport, on_delete=models.CASCADE, related_name='mitigations')
+    report = models.ForeignKey(ThreatReport, on_delete=models.CASCADE, related_name='mitigations', null=True, blank=True)
+    
     action_type = models.CharField(max_length=20, choices=ACTION_TYPES)
     
     # AWS integration details
